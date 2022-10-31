@@ -55,82 +55,161 @@ namespace UDP_FTP.File_Handler
             AckMSG ack = new AckMSG();
             CloseMSG cls = new CloseMSG();
 
-            var conSettings = new ConSettings()
+           var conSettings = new ConSettings()
             {
                 Type = Messages.HELLO,
                 To = Server,
                 From = Client,
                 ConID = 1,
             };
-
-
-            // TODO: Start the communication by receiving a HelloMSG message
-            // Receive and deserialize HelloMSG message 
-            // Verify if there are no errors
-            // Type must match one of the ConSettings' types and receiver address must be the server address
             int dataSize;
-            string data2;
+            string data;
+                Console.WriteLine("\n Waiting for the next client message..");
 
-            Console.WriteLine("\n Waiting for the next client message..");
+                // Receive message
+                dataSize = socket.ReceiveFrom(buffer, ref remoteEP);
+                data = Encoding.ASCII.GetString(buffer, 0, dataSize);
+                HelloMSG hello = JsonSerializer.Deserialize<HelloMSG>(data);
+                Console.WriteLine("A message received from " + remoteEP.ToString() + " " + data);
+                
+                //verify message 
+                  var error = ErrorHandler.VerifyGreeting(hello, conSettings);
+                    if (error == 0) Console.WriteLine("No error..");
+                    else throw new Exception(error.ToString());
+                // Send reply message
+                var helloReply = new HelloMSG()
+                {
+                    Type = Messages.HELLO_REPLY,
+                    To = hello.From,
+                    From = hello.To,
+                    ConID = hello.ConID
+                };
+                // TODO: If no error is found then HelloMSG will be sent back
 
-            // Receive message
-            dataSize = socket.ReceiveFrom(buffer, ref remoteEP);
-            data2 = Encoding.ASCII.GetString(buffer, 0, dataSize);
-            HelloMSG hello = JsonSerializer.Deserialize<HelloMSG>(data2);
-            Console.WriteLine("A message received from " + remoteEP.ToString() + " " + data);
-
-            // Verify message
-            var error = ErrorHandler.VerifyGreeting(hello, conSettings);
-            if (error == 0) Console.WriteLine("No error..");
-            else throw new Exception(error.ToString());
-
-            // TODO: If no error is found then HelloMSG will be sent back
-            greetBack.Type = Messages.HELLO_REPLY;
-            greetBack.To = hello.From;
-            greetBack.From = hello.To;
-            greetBack.ConID = hello.ConID;
-
-            msg = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(greetBack));
-            socket.SendTo(msg, msg.Length, SocketFlags.None, remoteEP);
+                msg = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(helloReply));
+                socket.SendTo(msg, msg.Length, SocketFlags.None, remoteEP);
 
             // TODO: Receive the next message
             // Expected message is a download RequestMSG message containing the file name
             // Receive the message and verify if there are no errors
-            dataSize = socket.ReceiveFrom(buffer, ref remoteEP);
-            data2 = Encoding.ASCII.GetString(buffer, 0, dataSize);
-            var requestMsg = JsonSerializer.Deserialize<RequestMSG>(data2);
-            Console.WriteLine("A message received from " + remoteEP.ToString() + " " + data);
-            conSettings = new ConSettings()
-            {
-                Type = Messages.REQUEST,
-                To = Server,
-                From = Client,
-                ConID = 1,
-            };
 
-            error = ErrorHandler.VerifyRequest(requestMsg, conSettings);
-            if (error == 0) Console.WriteLine("No error..");
-            else throw new Exception(error.ToString());
-
-
+            var rqstsize  = socket.ReceiveFrom(buffer,ref remoteEP);
+            RequestMSG requestmessage = JsonSerializer.Deserialize<RequestMSG>(Encoding.ASCII.GetString(buffer,0,rqstsize));
+             // TODO: Send a RequestMSG of type REPLY message to remoteEndpoint verifying the status
+            RequestMSG rqst = new RequestMSG()
+                {
+                 Type= Messages.REPLY,
+                 From= hello.To,
+                 To=hello.From,
+                 FileName= requestmessage.FileName,
+                 ConID =requestmessage.ConID,
+                 Status =  requestmessage.Status                   
+                };
             // TODO: Send a RequestMSG of type REPLY message to remoteEndpoint verifying the status
-            req.To = requestMsg.From;
-            req.From = requestMsg.To;
-            req.ConID = requestMsg.ConID;
-            req.Status = File.Exists($"{requestMsg.FileName}") ? ErrorType.NOERROR : ErrorType.BADREQUEST;
-            req.FileName = requestMsg.FileName;
-
-            msg = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(req));
-            socket.SendTo(msg, msg.Length, SocketFlags.None, remoteEP);
+            byte[] verifiedstatus = Encoding.ASCII.GetBytes(JsonSerializer.Serialize<RequestMSG>(rqst));
+            socket.SendTo(verifiedstatus,verifiedstatus.Length,SocketFlags.None,remoteEP);
 
             // TODO:  Start sending file data by setting first the socket ReceiveTimeout value
-
+            socket.ReceiveTimeout = 1000;
 
             // TODO: Open and read the text-file first
+            string text = System.IO.File.ReadAllText(requestmessage.FileName);
             // Make sure to locate a path on windows and macos platforms
-
-
+            string path =requestmessage.FileName;
+            byte[] textdata = Encoding.ASCII.GetBytes(text);
             // TODO: Sliding window with go-back-n implementation
+            int sequence = 0;
+            if(textdata.Length>(int)Params.SEGMENT_SIZE){
+              bool datatransfer = true;             
+
+              while(datatransfer){                
+                byte[] senddata = new byte[(int)Params.SEGMENT_SIZE];
+                                 
+                for(int i=0; i<(int)Params.WINDOW_SIZE; i++){   //loop for each packet                                    
+                    for(int j=0; j<(int)Params.SEGMENT_SIZE; j++){ // loop to grab segment_size of bytes and put it in senddata
+                    int index = sequence*(int)Params.SEGMENT_SIZE +j;
+                    senddata[j] = textdata[index]; 
+
+                    }
+                      DataMSG PDU = new DataMSG(){
+                        Type =Messages.DATA,
+                        From = hello.To,
+                        To = hello.From,
+                        ConID = 1,
+                        Size = senddata.Length,
+                        More = (sequence%(int)Params.WINDOW_SIZE!=0),
+                        Sequence = sequence,
+                        Data = senddata
+                        };
+                        byte[] message = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(PDU));
+                        socket.SendTo(message,message.Length,SocketFlags.None,remoteEP);          
+                }                     
+                
+                AckMSG[] cache = new AckMSG[(int)Params.WINDOW_SIZE];
+                for(int i =0; i<=(int)Params.WINDOW_SIZE;i++){
+                cache[i] =  JsonSerializer.Deserialize<AckMSG>(Encoding.ASCII.GetString(buffer,0,(socket.ReceiveFrom(buffer,SocketFlags.None,ref remoteEP))));
+               // TODO: Print each confirmed sequence in the console
+                Console.WriteLine(cache[i].Sequence);
+                }
+
+                // TODO: Receive and verify the acknowledgements (AckMSG) of sent messages
+                 // Your client implementation should send an AckMSG message for each received DataMSG message
+
+                if(cache[(int)Params.WINDOW_SIZE-1]==null){ //all hell breaks loose
+                    int highest_sequence = 0;
+                    for(int i=0; i<cache.Length; i++){
+                        AckMSG current_ack = cache[i];
+                        if(cache[i].Sequence>highest_sequence){
+                            highest_sequence = current_ack.Sequence;
+                        }
+                    }
+                    // receive the message and verify if there are no errors
+                    if(highest_sequence!=sequence){
+                        sequence =highest_sequence;
+                    } else{
+                        sequence++;
+                    }
+                }                
+              }
+              } else{
+                //send one data packet and  a closemsg
+                byte[] senddata = new byte[(int)Params.SEGMENT_SIZE];
+                for(int j=0; j<((int)Params.SEGMENT_SIZE; j++){
+                    int index = sequence*(int)Params.SEGMENT_SIZE +j;
+                    senddata[j] = textdata[index];
+              }             
+                            // TODO: Send a CloseMSG message to the client for the current session
+                            // Send close connection request
+                            // end the loop
+
+              DataMSG PDU = new DataMSG(){
+                        Type =Messages.DATA,
+                        From = hello.To,
+                        To = hello.From,
+                        ConID = 1,
+                        Size = senddata.Length,
+                        More = (sequence%(int)Params.WINDOW_SIZE!=0),
+                        Sequence = sequence,
+                        Data = senddata
+                        };
+                byte[] message = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(PDU));
+                socket.SendTo(message,message.Length,SocketFlags.None,remoteEP);   
+                CloseMSG msg = new CloseMSG{
+                    Type =Messages.CLOSE_REQUEST,
+                    From =hello.To,
+                    To=hello.From,
+                    ConID=1
+                };
+                byte[] closemsg = Encoding.ASCII.GetBytes(JsonSerializer.Serialize(msg));
+                socket.SendTo(closemsg,closemsg.Length,SocketFlags.None,remoteEP); 
+            };            
+            // TODO: Receive and verify a CloseMSG message confirmation for the current session
+            // Get close connection confirmation
+            // Receive the message and verify if there are no errors           
+
+        
+    }           
+            
             // Calculate the length of data to be sent
             // Send file-content as DataMSG message as long as there are still values to be sent
             // Consider the WINDOW_SIZE and SEGMENT_SIZE when sending a message  
@@ -140,29 +219,7 @@ namespace UDP_FTP.File_Handler
             // first you send a full window of data
             // second you wait for the acks
             // then you start again.
-
-
-
-            // TODO: Receive and verify the acknowledgements (AckMSG) of sent messages
-            // Your client implementation should send an AckMSG message for each received DataMSG message   
-
-
-
-            // TODO: Print each confirmed sequence in the console
-            // receive the message and verify if there are no errors
-
-
-            // TODO: Send a CloseMSG message to the client for the current session
-            // Send close connection request
-
-
-            // TODO: Receive and verify a CloseMSG message confirmation for the current session
-            // Get close connection confirmation
-            // Receive the message and verify if there are no errors
-
-
-            Console.WriteLine("Group members: {0} | {1}", "student_1", "student_2");
-            return ErrorType.NOERROR;
+            // Console.WriteLine("Group members: {0} | {1}", "student_1", "student_2");
+            // return ErrorType.NOERROR;
         }
     }
-}
